@@ -1,0 +1,84 @@
+// storage.rules
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    // ─── Helper functions ─────────────────────────────────────────────────────
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(uid) {
+      return isAuthenticated() && request.auth.uid == uid;
+    }
+
+    // Allowed image MIME types only
+    function isValidImage() {
+      return request.resource.contentType.matches('image/jpeg')
+          || request.resource.contentType.matches('image/png')
+          || request.resource.contentType.matches('image/webp');
+    }
+
+    // Max 5 MB per file
+    function isWithinSizeLimit() {
+      return request.resource.size <= 5 * 1024 * 1024;
+    }
+
+    // Reject dangerous extensions in filename metadata
+    function isSafeFilename() {
+      return !(request.resource.name.matches('.*\\.(exe|js|php|bat|sh|py|rb|pl|cmd|ps1|vbs|svg)$'));
+    }
+
+    function isValidUpload() {
+      return isValidImage() && isWithinSizeLimit() && isSafeFilename();
+    }
+
+    // ─── Product images ───────────────────────────────────────────────────────
+    // Path: products/{userId}/{filename}
+    match /products/{userId}/{filename} {
+      // Anyone can read active product images
+      allow read: if true;
+
+      // Only the owner (authenticated) can upload their own product images
+      allow create: if isOwner(userId)
+        && isValidUpload();
+
+      // Owner can replace their image
+      allow update: if isOwner(userId)
+        && isValidUpload();
+
+      // Owner can delete their own images; admins via Admin SDK
+      allow delete: if isOwner(userId);
+    }
+
+    // ─── User avatars ─────────────────────────────────────────────────────────
+    // Path: avatars/{userId}/{filename}
+    match /avatars/{userId}/{filename} {
+      allow read: if true;
+
+      allow create: if isOwner(userId)
+        && isValidUpload()
+        // Avatars max 2MB
+        && request.resource.size <= 2 * 1024 * 1024;
+
+      allow update: if isOwner(userId)
+        && isValidUpload()
+        && request.resource.size <= 2 * 1024 * 1024;
+
+      allow delete: if isOwner(userId);
+    }
+
+    // ─── Admin uploads ────────────────────────────────────────────────────────
+    // Path: admin/{filename} — only via Admin SDK, never from client
+    match /admin/{allPaths=**} {
+      allow read:  if request.auth != null;
+      allow write: if false; // Admin SDK only
+    }
+
+    // ─── Block all other paths ────────────────────────────────────────────────
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

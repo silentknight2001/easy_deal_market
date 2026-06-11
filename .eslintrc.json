@@ -1,0 +1,26 @@
+{
+  "extends": [
+    "next/core-web-vitals",
+    "next/typescript"
+  ],
+  "rules": {
+    "@typescript-eslint/no-unused-vars":        ["warn", { "argsIgnorePattern": "^_" }],
+    "@typescript-eslint/no-explicit-any":        "error",
+    "@typescript-eslint/no-non-null-assertion":  "warn",
+    "react/no-unescaped-entities":               "warn",
+    "no-console":                                ["warn", { "allow": ["warn", "error"] }],
+    "prefer-const":                              "error",
+    "no-var":                                    "error",
+    "eqeqeq":                                    ["error", "always"],
+    "no-eval":                                   "error",
+    "no-implied-eval":                           "error",
+    "no-new-func":                               "error",
+    "no-script-url":                             "error"
+  },
+  "ignorePatterns": [
+    "node_modules/",
+    ".next/",
+    "functions/lib/",
+    "out/"
+  ]
+}

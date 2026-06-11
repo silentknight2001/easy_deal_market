@@ -1,0 +1,271 @@
+// firestore.rules
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ─── Helper functions ─────────────────────────────────────────────────────
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(uid) {
+      return isAuthenticated() && request.auth.uid == uid;
+    }
+
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && getUserData().role == 'admin';
+    }
+
+    function isSeller() {
+      return isAuthenticated() && getUserData().role == 'seller';
+    }
+
+    function isActiveUser() {
+      return isAuthenticated() && getUserData().status == 'active';
+    }
+
+    function isVerifiedSeller() {
+      return isSeller() && getUserData().isVerifiedSeller == true;
+    }
+
+    function validString(field, min, max) {
+      return field is string && field.size() >= min && field.size() <= max;
+    }
+
+    function notContainsScript(field) {
+      return !field.matches('.*<script.*') && !field.matches('.*javascript:.*');
+    }
+
+    function isValidProductStatus(status) {
+      return status in ['pending', 'active', 'sold', 'rejected', 'removed', 'draft'];
+    }
+
+    function isValidCategory(cat) {
+      return cat in [
+        'mobiles', 'laptops', 'tvs', 'furniture',
+        'bikes', 'electronics', 'home_appliances'
+      ];
+    }
+
+    function isValidCondition(cond) {
+      return cond in ['like_new', 'good', 'fair', 'poor'];
+    }
+
+    function isValidRole(role) {
+      return role in ['buyer', 'seller', 'admin'];
+    }
+
+    // ─── Users Collection ─────────────────────────────────────────────────────
+    match /users/{userId} {
+      // Anyone authenticated can read public profiles
+      allow read: if isAuthenticated();
+
+      // Users can create their own document (on registration)
+      allow create: if isOwner(userId)
+        && validString(request.resource.data.displayName, 2, 60)
+        && request.resource.data.role in ['buyer', 'seller']
+        && request.resource.data.status == 'active'
+        && request.resource.data.isVerifiedSeller == false
+        && request.resource.data.rating == 0
+        && request.resource.data.ratingCount == 0
+        && request.resource.data.totalListings == 0
+        && request.resource.data.totalSales == 0;
+
+      // Users can update limited fields on their own profile
+      allow update: if isOwner(userId)
+        && !request.resource.data.diff(resource.data).affectedKeys()
+            .hasAny(['uid', 'role', 'status', 'isVerifiedSeller',
+                     'rating', 'ratingCount', 'totalListings',
+                     'totalSales', 'failedLoginAttempts', 'lockedUntil'])
+        || isAdmin();
+
+      // Only admins can delete users
+      allow delete: if isAdmin();
+
+      // ── Wishlist subcollection ─────────────────────────────────────────────
+      match /wishlist/{productId} {
+        allow read:   if isOwner(userId);
+        allow write:  if isOwner(userId) && isActiveUser();
+      }
+    }
+
+    // ─── Products Collection ──────────────────────────────────────────────────
+    match /products/{productId} {
+      // Active products visible to all; pending/rejected only to seller+admin
+      allow read: if resource.data.status == 'active'
+        || resource.data.status == 'sold'
+        || (isAuthenticated() && resource.data.sellerId == request.auth.uid)
+        || isAdmin();
+
+      // Sellers can create products (status must be 'pending')
+      allow create: if isActiveUser()
+        && request.resource.data.sellerId == request.auth.uid
+        && request.resource.data.status == 'pending'
+        && isValidCategory(request.resource.data.category)
+        && isValidCondition(request.resource.data.condition)
+        && request.resource.data.price is number
+        && request.resource.data.price > 0
+        && request.resource.data.price <= 10000000
+        && validString(request.resource.data.title, 5, 100)
+        && notContainsScript(request.resource.data.title)
+        && validString(request.resource.data.description, 20, 2000)
+        && notContainsScript(request.resource.data.description)
+        && request.resource.data.images.size() >= 1
+        && request.resource.data.images.size() <= 6
+        && request.resource.data.views == 0
+        && request.resource.data.wishlistCount == 0
+        && request.resource.data.reportCount == 0;
+
+      // Sellers can update only their own PENDING listings (re-submit = pending)
+      allow update: if isActiveUser()
+        && resource.data.sellerId == request.auth.uid
+        && resource.data.status in ['pending', 'active', 'draft']
+        && request.resource.data.status == 'pending'
+        && request.resource.data.sellerId == resource.data.sellerId
+        && isValidCategory(request.resource.data.category)
+        && isValidCondition(request.resource.data.condition)
+        || isAdmin()
+        // Allow view count increment (any authenticated user)
+        || (isAuthenticated()
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['views'])
+          && request.resource.data.views == resource.data.views + 1)
+        // Allow wishlist count change
+        || (isAuthenticated()
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['wishlistCount']));
+
+      // Only sellers can delete their own draft/rejected listings; admins can delete anything
+      allow delete: if (isOwner(resource.data.sellerId)
+          && resource.data.status in ['draft', 'rejected'])
+        || isAdmin();
+    }
+
+    // ─── Bookings Collection ──────────────────────────────────────────────────
+    match /bookings/{bookingId} {
+      // Only buyer or seller of the booking can read it
+      allow read: if isAuthenticated()
+        && (resource.data.buyerId == request.auth.uid
+          || resource.data.sellerId == request.auth.uid)
+        || isAdmin();
+
+      // Buyers can create bookings for active products
+      allow create: if isActiveUser()
+        && request.resource.data.buyerId == request.auth.uid
+        && request.resource.data.status == 'pending'
+        && request.resource.data.bookingFeePaid == false
+        && validString(request.resource.data.buyerPhone, 10, 15)
+        && validString(request.resource.data.buyerWhatsapp, 10, 15);
+
+      // Sellers can accept/reject; buyers can cancel; admins can do anything
+      allow update: if isAuthenticated()
+        && (resource.data.buyerId == request.auth.uid
+          || resource.data.sellerId == request.auth.uid)
+        && request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['status', 'cancelReason', 'updatedAt', 'meetupLocation', 'meetupDate'])
+        || isAdmin();
+
+      allow delete: if isAdmin();
+    }
+
+    // ─── Reviews Collection ───────────────────────────────────────────────────
+    match /reviews/{reviewId} {
+      allow read: if true; // Public
+
+      allow create: if isActiveUser()
+        && request.resource.data.reviewerId == request.auth.uid
+        && request.resource.data.rating is number
+        && request.resource.data.rating >= 1
+        && request.resource.data.rating <= 5
+        && validString(request.resource.data.comment, 10, 1000)
+        && notContainsScript(request.resource.data.comment);
+
+      allow update: if isOwner(resource.data.reviewerId)
+        && request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['comment', 'rating'])
+        || isAdmin();
+
+      allow delete: if isAdmin()
+        || isOwner(resource.data.reviewerId);
+    }
+
+    // ─── Reports Collection ───────────────────────────────────────────────────
+    match /reports/{reportId} {
+      allow read:   if isAdmin()
+        || (isAuthenticated() && resource.data.reporterId == request.auth.uid);
+
+      allow create: if isActiveUser()
+        && request.resource.data.reporterId == request.auth.uid
+        && request.resource.data.status == 'pending'
+        && validString(request.resource.data.description, 10, 500)
+        && request.resource.data.type in [
+            'scam','spam','inappropriate','wrong_category','duplicate','other'
+          ];
+
+      allow update: if isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // ─── Notifications Collection ─────────────────────────────────────────────
+    match /notifications/{notifId} {
+      allow read:   if isAuthenticated()
+        && resource.data.userId == request.auth.uid;
+
+      // Only backend (Admin SDK) creates notifications
+      allow create: if isAdmin();
+
+      // Users can only mark their own notifications as read
+      allow update: if isAuthenticated()
+        && resource.data.userId == request.auth.uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isRead'])
+        && request.resource.data.isRead == true;
+
+      allow delete: if isAdmin()
+        || (isAuthenticated() && resource.data.userId == request.auth.uid);
+    }
+
+    // ─── Transactions Collection ──────────────────────────────────────────────
+    match /transactions/{txId} {
+      // Users can only read their own transactions
+      allow read: if isAuthenticated()
+        && resource.data.userId == request.auth.uid
+        || isAdmin();
+
+      // Only Admin SDK creates/updates transactions (never from client)
+      allow create, update, delete: if false;
+    }
+
+    // ─── Admin Logs Collection ────────────────────────────────────────────────
+    match /adminLogs/{logId} {
+      allow read:   if isAdmin();
+      allow write:  if false; // Admin SDK only
+    }
+
+    // ─── Contact Messages Collection ──────────────────────────────────────────
+    match /contactMessages/{msgId} {
+      allow read:   if isAdmin();
+      allow create: if true; // Public form
+      allow update, delete: if isAdmin();
+    }
+
+    // ─── Categories Collection (if stored in Firestore) ────────────────────────
+    match /categories/{catId} {
+      allow read:   if true;
+      allow write:  if isAdmin();
+    }
+
+    // ─── App Config (read-only for clients) ───────────────────────────────────
+    match /config/{configId} {
+      allow read:  if true;
+      allow write: if isAdmin();
+    }
+
+    // ─── Block all other collections ─────────────────────────────────────────
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
