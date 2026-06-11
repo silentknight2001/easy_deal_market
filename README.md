@@ -362,4 +362,4 @@ MIT License — © 2024 Easy Deals LMG
 
 ---
 
-*Built with ❤️ for Assam*
+*Built with ❤️ for Assam By Nayan Biswas*
